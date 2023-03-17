@@ -8,6 +8,7 @@
 
 #include <uapi/linux/io_uring.h>
 
+#include "cancel.h"
 #include "io_uring.h"
 #include "rsrc.h"
 #include "uring_cmd.h"
@@ -45,6 +46,10 @@ static inline void io_req_set_cqe32_extra(struct io_kiocb *req,
 void io_uring_cmd_done(struct io_uring_cmd *ioucmd, ssize_t ret, ssize_t res2)
 {
 	struct io_kiocb *req = cmd_to_io_kiocb(ioucmd);
+
+	spin_lock(&req->ctx->cmd_lock);
+	list_del(&ioucmd->list);
+	spin_unlock(&req->ctx->cmd_lock);
 
 	if (ret < 0)
 		req_set_fail(req);
@@ -130,7 +135,12 @@ int io_uring_cmd(struct io_kiocb *req, unsigned int issue_flags)
 	if (req_has_async_data(req))
 		ioucmd->cmd = req->async_data;
 
+	spin_lock(&req->ctx->cmd_lock);
 	ret = file->f_op->uring_cmd(ioucmd, issue_flags);
+	if (ret == -EIOCBQUEUED)
+		list_add_tail(&ioucmd->list, &req->ctx->cmd_list);
+	spin_unlock(&req->ctx->cmd_lock);
+
 	if (ret == -EAGAIN) {
 		if (!req_has_async_data(req)) {
 			if (io_alloc_async_data(req))
@@ -158,3 +168,66 @@ int io_uring_cmd_import_fixed(u64 ubuf, unsigned long len, int rw,
 	return io_import_fixed(rw, iter, req->imu, ubuf, len);
 }
 EXPORT_SYMBOL_GPL(io_uring_cmd_import_fixed);
+
+int io_uring_cmd_cancel(struct io_ring_ctx *ctx, struct io_cancel_data *cd)
+{
+	struct io_uring_cmd *cmd;
+	struct io_kiocb *req;
+	int res = -ENOENT;
+
+	spin_lock(&ctx->cmd_lock);
+
+	list_for_each_entry(cmd, &ctx->cmd_list, list) {
+		req = cmd_to_io_kiocb(cmd);
+
+		if (!(cd->flags & IORING_ASYNC_CANCEL_ANY)) {
+			if (cd->flags & IORING_ASYNC_CANCEL_FD) {
+				if (cd->file != cmd->file)
+					continue;
+			} else {
+				if (cd->data != req->cqe.user_data)
+					continue;
+			}
+		}
+
+		res = -EINVAL;
+		if (req->file->f_op->uring_cmd_cancel) {
+			res = req->file->f_op->uring_cmd_cancel(cmd);
+			if (!res)
+				list_del(&cmd->list);
+		}
+		break;
+	}
+
+	spin_unlock(&ctx->cmd_lock);
+
+	if (!res)
+		io_req_task_queue_fail(req, -ECANCELED);
+	return res;
+}
+
+
+/* Returns true if we found and killed one or more cmds */
+__cold bool io_uring_kill_cmds(struct io_ring_ctx *ctx, struct task_struct *tsk)
+{
+	struct io_uring_cmd *cmd, *tmp;
+	int canceled = 0, res;
+
+	spin_lock(&ctx->cmd_lock);
+	list_for_each_entry_safe(cmd, tmp, &ctx->cmd_list, list) {
+		struct io_kiocb *req = cmd_to_io_kiocb(cmd);
+
+		if (tsk && req->task != tsk)
+			continue;
+		if (req->file->f_op->uring_cmd_cancel) {
+			res = req->file->f_op->uring_cmd_cancel(cmd);
+			if (!res) {
+				list_del(&cmd->list);
+				io_req_queue_tw_complete(req, -ECANCELED);
+				canceled++;
+			}
+		}
+	}
+	spin_unlock(&ctx->cmd_lock);
+	return canceled != 0;
+}

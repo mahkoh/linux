@@ -24,7 +24,6 @@
 #include "sync.h"
 #include "advise.h"
 #include "openclose.h"
-#include "uring_cmd.h"
 #include "epoll.h"
 #include "statx.h"
 #include "net.h"
@@ -33,6 +32,7 @@
 #include "poll.h"
 #include "cancel.h"
 #include "rw.h"
+#include "uring_cmd.h"
 
 static int io_no_issue(struct io_kiocb *req, unsigned int issue_flags)
 {
