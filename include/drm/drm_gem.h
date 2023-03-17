@@ -37,6 +37,7 @@
 #include <linux/kref.h>
 #include <linux/dma-resv.h>
 
+#include <drm/drm_uring.h>
 #include <drm/drm_vma_manager.h>
 
 struct iosys_map;
@@ -378,7 +379,8 @@ struct drm_gem_object {
 	.poll		= drm_poll,\
 	.read		= drm_read,\
 	.llseek		= noop_llseek,\
-	.mmap		= drm_gem_mmap
+	.mmap		= drm_gem_mmap,\
+	DRM_URING_FOPS
 
 /**
  * DEFINE_DRM_GEM_FOPS() - macro to generate file operations for GEM drivers
@@ -396,7 +398,7 @@ struct drm_gem_object {
 #define DEFINE_DRM_GEM_FOPS(name) \
 	static const struct file_operations name = {\
 		.owner		= THIS_MODULE,\
-		DRM_GEM_FOPS,\
+		DRM_GEM_FOPS\
 	}
 
 void drm_gem_object_release(struct drm_gem_object *obj);

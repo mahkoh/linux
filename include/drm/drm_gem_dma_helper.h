@@ -5,6 +5,7 @@
 #include <drm/drm_file.h>
 #include <drm/drm_ioctl.h>
 #include <drm/drm_gem.h>
+#include <drm/drm_uring.h>
 
 struct drm_mode_create_dumb;
 
@@ -274,6 +275,7 @@ unsigned long drm_gem_dma_get_unmapped_area(struct file *filp,
 		.llseek		= noop_llseek,\
 		.mmap		= drm_gem_mmap,\
 		DRM_GEM_DMA_UNMAPPED_AREA_FOPS \
+		DRM_URING_FOPS \
 	}
 
 #endif /* __DRM_GEM_DMA_HELPER_H__ */

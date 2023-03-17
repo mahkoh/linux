@@ -42,6 +42,7 @@ drm-y := \
 	drm_syncobj.o \
 	drm_sysfs.o \
 	drm_trace_points.o \
+	drm_uring.o \
 	drm_vblank.o \
 	drm_vblank_work.o \
 	drm_vma_manager.o \

@@ -21,6 +21,7 @@
 #include <drm/drm_prime.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_vblank.h>
+#include <drm/drm_uring.h>
 
 #include "omap_dmm_tiler.h"
 #include "omap_drv.h"
@@ -646,6 +647,7 @@ static const struct file_operations omapdriver_fops = {
 	.poll = drm_poll,
 	.read = drm_read,
 	.llseek = noop_llseek,
+	DRM_URING_FOPS
 };
 
 static const struct drm_driver omap_drm_driver = {

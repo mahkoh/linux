@@ -514,7 +514,7 @@ static void etnaviv_fop_show_fdinfo(struct seq_file *m, struct file *f)
 
 static const struct file_operations fops = {
 	.owner = THIS_MODULE,
-	DRM_GEM_FOPS,
+	DRM_GEM_FOPS
 	.show_fdinfo = etnaviv_fop_show_fdinfo,
 };
 

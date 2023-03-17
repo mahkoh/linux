@@ -44,6 +44,7 @@
 #include <drm/drm_ioctl.h>
 #include <drm/drm_managed.h>
 #include <drm/drm_probe_helper.h>
+#include <drm/drm_uring.h>
 
 #include "display/intel_acpi.h"
 #include "display/intel_bw.h"
@@ -1688,6 +1689,7 @@ static const struct file_operations i915_driver_fops = {
 #ifdef CONFIG_PROC_FS
 	.show_fdinfo = i915_drm_client_fdinfo,
 #endif
+	DRM_URING_FOPS
 };
 
 static int

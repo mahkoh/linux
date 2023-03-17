@@ -357,7 +357,7 @@ int ivpu_shutdown(struct ivpu_device *vdev)
 
 static const struct file_operations ivpu_fops = {
 	.owner		= THIS_MODULE,
-	DRM_ACCEL_FOPS,
+	DRM_ACCEL_FOPS
 };
 
 static const struct drm_driver driver = {

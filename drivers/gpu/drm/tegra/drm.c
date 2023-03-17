@@ -22,6 +22,7 @@
 #include <drm/drm_ioctl.h>
 #include <drm/drm_prime.h>
 #include <drm/drm_vblank.h>
+#include <drm/drm_uring.h>
 
 #if IS_ENABLED(CONFIG_ARM_DMA_USE_IOMMU)
 #include <asm/dma-iommu.h>
@@ -804,6 +805,7 @@ static const struct file_operations tegra_drm_fops = {
 	.read = drm_read,
 	.compat_ioctl = drm_compat_ioctl,
 	.llseek = noop_llseek,
+	DRM_URING_FOPS
 };
 
 static int tegra_drm_context_cleanup(int id, void *p, void *data)

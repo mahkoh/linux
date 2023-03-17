@@ -28,6 +28,7 @@
 #include <drm/drm_gem.h>
 #include <drm/drm_vblank.h>
 #include <drm/drm_managed.h>
+#include <drm/drm_uring.h>
 #include "amdgpu_drv.h"
 
 #include <drm/drm_pciids.h>
@@ -2752,8 +2753,9 @@ static const struct file_operations amdgpu_driver_kms_fops = {
 	.compat_ioctl = amdgpu_kms_compat_ioctl,
 #endif
 #ifdef CONFIG_PROC_FS
-	.show_fdinfo = amdgpu_show_fdinfo
+	.show_fdinfo = amdgpu_show_fdinfo,
 #endif
+	DRM_URING_FOPS
 };
 
 int amdgpu_file_to_fpriv(struct file *filp, struct amdgpu_fpriv **fpriv)
