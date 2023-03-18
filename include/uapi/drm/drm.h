@@ -1167,6 +1167,17 @@ struct drm_event_crtc_sequence {
 	__u64			sequence;
 };
 
+#define DRM_URING_SYNCOBJ_WAIT	0
+
+#define DRM_SYNCOBJ_URING_WAIT_FLAGS_WAIT_FOR_SUBMIT	(1 << 0)
+#define DRM_SYNCOBJ_URING_WAIT_FLAGS_WAIT_AVAILABLE	(1 << 1)
+
+struct drm_syncobj_uring_wait {
+	__u64 point;
+	__u32 handle;
+	__u32 flags;
+};
+
 /* typedef area */
 #ifndef __KERNEL__
 typedef struct drm_clip_rect drm_clip_rect_t;

@@ -19,6 +19,8 @@
 	}
 
 static const struct drm_uring_cmd_desc drm_cmds[] = {
+	DRM_URING_CMD_DEF(DRM_URING_SYNCOBJ_WAIT, drm_syncobj_uring_cmd_wait,
+			  drm_syncobj_uring_cmd_wait_cancel),
 };
 
 #define DRM_CORE_URING_CMD_COUNT ARRAY_SIZE(drm_cmds)
