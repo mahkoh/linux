@@ -26,6 +26,7 @@
 #include <drm/drm_ioctl.h>
 #include <drm/drm_pciids.h>
 #include <drm/drm_vblank.h>
+#include <drm/drm_uring.h>
 
 #include "framebuffer.h"
 #include "gem.h"
@@ -473,6 +474,7 @@ static const struct file_operations psb_gem_fops = {
 	.mmap = drm_gem_mmap,
 	.poll = drm_poll,
 	.read = drm_read,
+	DRM_URING_FOPS
 };
 
 static const struct drm_driver driver = {

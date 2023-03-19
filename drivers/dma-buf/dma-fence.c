@@ -617,6 +617,53 @@ void dma_fence_enable_sw_signaling(struct dma_fence *fence)
 }
 EXPORT_SYMBOL(dma_fence_enable_sw_signaling);
 
+static int __dma_fence_add_callback_locked(struct dma_fence *fence,
+					   struct dma_fence_cb *cb,
+					   dma_fence_func_t func)
+{
+	if (__dma_fence_enable_signaling(fence)) {
+		cb->func = func;
+		list_add_tail(&cb->node, &fence->cb_list);
+		return 0;
+	} else {
+		INIT_LIST_HEAD(&cb->node);
+		return -ENOENT;
+	}
+}
+
+/**
+ * dma_fence_add_callback_locked - add a callback to be called when the fence
+ * is signaled
+ * @fence: the fence to wait on
+ * @cb: the callback to register
+ * @func: the function to call
+ *
+ * Add a software callback to the fence. The caller should keep a reference to
+ * the fence.
+ * 
+ * @cb will be initialized by dma_fence_add_callback_locked(), no initialization
+ * by the caller is required. Any number of callbacks can be registered to a
+ * fence, but a callback can only be registered to one fence at a time.
+ * 
+ * If fence is already signaled, this function will return -ENOENT (and *not*
+ * call the callback).
+ * 
+ * Note that the callback can be called from an atomic context or irq context.
+ * 
+ * Unlike dma_fence_add_callback(), this function must be called with
+ * &dma_fence.lock held.
+ * 
+ * Returns 0 in case of success, -ENOENT if the fence is already signaled and
+ * -EINVAL in case of error.
+ */
+int dma_fence_add_callback_locked(struct dma_fence *fence,
+				  struct dma_fence_cb *cb,
+				  dma_fence_func_t func)
+{
+	return __dma_fence_add_callback_locked(fence, cb, func);
+}
+EXPORT_SYMBOL(dma_fence_add_callback_locked);
+
 /**
  * dma_fence_add_callback - add a callback to be called when the fence
  * is signaled
@@ -643,7 +690,7 @@ int dma_fence_add_callback(struct dma_fence *fence, struct dma_fence_cb *cb,
 			   dma_fence_func_t func)
 {
 	unsigned long flags;
-	int ret = 0;
+	int ret;
 
 	if (WARN_ON(!fence || !func))
 		return -EINVAL;
@@ -655,13 +702,7 @@ int dma_fence_add_callback(struct dma_fence *fence, struct dma_fence_cb *cb,
 
 	spin_lock_irqsave(fence->lock, flags);
 
-	if (__dma_fence_enable_signaling(fence)) {
-		cb->func = func;
-		list_add_tail(&cb->node, &fence->cb_list);
-	} else {
-		INIT_LIST_HEAD(&cb->node);
-		ret = -ENOENT;
-	}
+	ret = __dma_fence_add_callback_locked(fence, cb, func);
 
 	spin_unlock_irqrestore(fence->lock, flags);
 

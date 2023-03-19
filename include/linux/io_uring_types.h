@@ -320,6 +320,12 @@ struct io_ring_ctx {
 		unsigned		cq_last_tm_flush;
 	} ____cacheline_aligned_in_smp;
 
+	/* cmds */
+	struct {
+		spinlock_t		cmd_lock;
+		struct list_head	cmd_list;
+	} ____cacheline_aligned_in_smp;
+
 	/* Keep this last, we don't need it for the fast path */
 	struct wait_queue_head		poll_wq;
 	struct io_restriction		restrictions;
@@ -495,8 +501,8 @@ struct io_cqe {
  */
 struct io_cmd_data {
 	struct file		*file;
-	/* each command gets 56 bytes of data */
-	__u8			data[56];
+	/* each command gets 72 bytes of data */
+	__u8			data[72];
 };
 
 static inline void io_kiocb_cmd_sz_check(size_t cmd_sz)

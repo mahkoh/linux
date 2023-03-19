@@ -16,6 +16,7 @@
 #include "poll.h"
 #include "timeout.h"
 #include "cancel.h"
+#include "uring_cmd.h"
 
 struct io_cancel {
 	struct file			*file;
@@ -102,6 +103,10 @@ int io_try_cancel(struct io_uring_task *tctx, struct io_cancel_data *cd,
 	if (!(cd->flags & IORING_ASYNC_CANCEL_FD))
 		ret = io_timeout_cancel(ctx, cd);
 	spin_unlock(&ctx->completion_lock);
+	if (ret != -ENOENT)
+		return ret;
+
+	ret = io_uring_cmd_cancel(ctx, cd);
 	return ret;
 }
 

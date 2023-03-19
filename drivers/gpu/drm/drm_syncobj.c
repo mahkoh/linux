@@ -136,6 +136,17 @@
  * requirement is inherited from the wait-before-signal behavior required by
  * the Vulkan timeline semaphore API.
  *
+ * Alternatively the io_uring uring_cmd &DRM_URING_SYNCOBJ_WAIT can be used.
+ * Each &DRM_URING_SYNCOBJ_WAIT only performs a wait on a single fence but
+ * multiple such commands can be submitted via io_uring concurrently. These
+ * commands are processed independently of each other. There is no built-in
+ * timeout or cancellation mechanism for these commands, the standard io_uring
+ * mechanisms should be used instead.
+ *
+ * The flags &DRM_SYNCOBJ_URING_WAIT_FLAGS_WAIT_FOR_SUBMIT and
+ * &DRM_SYNCOBJ_URING_WAIT_FLAGS_WAIT_AVAILABLE work like their ioctl
+ * counterparts.
+ *
  *
  * Import/export of syncobjs
  * -------------------------
@@ -187,6 +198,7 @@
 #include <linux/dma-fence-unwrap.h>
 #include <linux/file.h>
 #include <linux/fs.h>
+#include <linux/io_uring.h>
 #include <linux/sched/signal.h>
 #include <linux/sync_file.h>
 #include <linux/uaccess.h>
@@ -209,8 +221,23 @@ struct syncobj_wait_entry {
 	u64    point;
 };
 
+struct syncobj_uring_wait {
+	struct list_head node;
+	struct io_uring_cmd *cmd;
+	struct drm_syncobj *syncobj;
+	u64 point;
+	struct dma_fence *fence;
+	struct dma_fence_cb fence_cb;
+	atomic_t state;
+	int ret;
+	bool available;
+};
+
 static void syncobj_wait_syncobj_func(struct drm_syncobj *syncobj,
 				      struct syncobj_wait_entry *wait);
+
+static void syncobj_uring_wait_syncobj_func(struct drm_syncobj *syncobj,
+					    struct syncobj_uring_wait *wait);
 
 /**
  * drm_syncobj_find - lookup and reference a sync object.
@@ -289,6 +316,7 @@ void drm_syncobj_add_point(struct drm_syncobj *syncobj,
 			   uint64_t point)
 {
 	struct syncobj_wait_entry *cur, *tmp;
+	struct syncobj_uring_wait *cur_uring, *tmp_uring;
 	struct dma_fence *prev;
 
 	dma_fence_get(fence);
@@ -304,6 +332,8 @@ void drm_syncobj_add_point(struct drm_syncobj *syncobj,
 
 	list_for_each_entry_safe(cur, tmp, &syncobj->cb_list, node)
 		syncobj_wait_syncobj_func(syncobj, cur);
+	list_for_each_entry_safe(cur_uring, tmp_uring, &syncobj->uring_cb_list, node)
+		syncobj_uring_wait_syncobj_func(syncobj, cur_uring);
 	spin_unlock(&syncobj->lock);
 
 	/* Walk the chain once to trigger garbage collection */
@@ -324,6 +354,7 @@ void drm_syncobj_replace_fence(struct drm_syncobj *syncobj,
 {
 	struct dma_fence *old_fence;
 	struct syncobj_wait_entry *cur, *tmp;
+	struct syncobj_uring_wait *cur_uring, *tmp_uring;
 
 	if (fence)
 		dma_fence_get(fence);
@@ -337,6 +368,8 @@ void drm_syncobj_replace_fence(struct drm_syncobj *syncobj,
 	if (fence != old_fence) {
 		list_for_each_entry_safe(cur, tmp, &syncobj->cb_list, node)
 			syncobj_wait_syncobj_func(syncobj, cur);
+		list_for_each_entry_safe(cur_uring, tmp_uring, &syncobj->uring_cb_list, node)
+			syncobj_uring_wait_syncobj_func(syncobj, cur_uring);
 	}
 
 	spin_unlock(&syncobj->lock);
@@ -501,6 +534,7 @@ int drm_syncobj_create(struct drm_syncobj **out_syncobj, uint32_t flags,
 
 	kref_init(&syncobj->refcount);
 	INIT_LIST_HEAD(&syncobj->cb_list);
+	INIT_LIST_HEAD(&syncobj->uring_cb_list);
 	spin_lock_init(&syncobj->lock);
 
 	if (flags & DRM_SYNCOBJ_CREATE_SIGNALED) {
@@ -1515,3 +1549,241 @@ int drm_syncobj_query_ioctl(struct drm_device *dev, void *data,
 
 	return ret;
 }
+
+#ifdef CONFIG_IO_URING
+
+struct syncobj_uring_wait_pdu {
+	refcount_t ref;
+	struct syncobj_uring_wait *wait;
+};
+
+/* Waiting for the timeline point to be submitted */
+#define SYNCOBJ_URING_WAIT_STATE_WAIT_FOR_SUBMIT	1
+/* We have installed a callback in the fence */
+#define SYNCOBJ_URING_WAIT_STATE_WAIT_FOR_SIGNAL	2
+/* The io_uring task is about to be completed */
+#define SYNCOBJ_URING_WAIT_STATE_COMPLETED		3
+
+static void
+syncobj_uring_wait_put(struct syncobj_uring_wait *wait) {
+	struct syncobj_uring_wait_pdu *pdu = (void *)wait->cmd->pdu;
+
+	if (refcount_dec_and_test(&pdu->ref))
+		kfree(wait);
+}
+
+static void
+syncobj_uring_advance_fence(struct dma_fence **fence, uint32_t point) {
+	if (!*fence)
+		return;
+	if (dma_fence_chain_find_seqno(fence, point)) {
+		dma_fence_put(*fence);
+		*fence = NULL;
+	} else if (!*fence) {
+		*fence = dma_fence_get_stub();
+	}
+}
+
+static void
+syncobj_uring_wait_complete_in_task(struct io_uring_cmd *cmd)
+{
+	struct syncobj_uring_wait_pdu *pdu = (void *)cmd->pdu;
+	struct syncobj_uring_wait *wait = pdu->wait;
+	int ret = wait->ret;
+
+	dma_fence_put(wait->fence);
+	drm_syncobj_put(wait->syncobj);
+	syncobj_uring_wait_put(wait);
+	io_uring_cmd_done(cmd, ret, 0);
+}
+
+static void
+syncobj_uring_wait_schedule_complete(struct syncobj_uring_wait *wait, int ret)
+{
+	wait->ret = ret;
+	io_uring_cmd_complete_in_task(wait->cmd,
+				      syncobj_uring_wait_complete_in_task);
+}
+
+static void
+syncobj_uring_wait_fence_func(struct dma_fence *fence, struct dma_fence_cb *cb)
+{
+	struct syncobj_uring_wait *wait;
+
+	wait = container_of(cb, struct syncobj_uring_wait, fence_cb);
+	atomic_set(&wait->state, SYNCOBJ_URING_WAIT_STATE_COMPLETED);
+	syncobj_uring_wait_schedule_complete(wait, 0);
+}
+
+static int
+syncobj_uring_wait_add_fence_cb(struct dma_fence *fence,
+				struct syncobj_uring_wait *wait,
+				int *ret)
+{
+	unsigned long flags;
+
+	if (wait->available) {
+		*ret = 0;
+		atomic_set(&wait->state, SYNCOBJ_URING_WAIT_STATE_COMPLETED);
+		return -1;
+	}
+	wait->fence = fence;
+
+	spin_lock_irqsave(fence->lock, flags);
+	*ret = dma_fence_add_callback_locked(fence, &wait->fence_cb,
+					     syncobj_uring_wait_fence_func);
+	if (!*ret)
+		atomic_set_release(&wait->state, SYNCOBJ_URING_WAIT_STATE_WAIT_FOR_SIGNAL);
+	spin_unlock_irqrestore(fence->lock, flags);
+
+	if (*ret) {
+		if (*ret == -ENOENT)
+			*ret = 0;
+		atomic_set(&wait->state, SYNCOBJ_URING_WAIT_STATE_COMPLETED);
+		return -1;
+	}
+
+	return 0;
+}
+
+static void
+syncobj_uring_wait_syncobj_func(struct drm_syncobj *syncobj,
+			        struct syncobj_uring_wait *wait)
+{
+	struct dma_fence *fence = NULL;
+	int ret;
+
+	fence = rcu_dereference_protected(syncobj->fence,
+					  lockdep_is_held(&syncobj->lock));
+	dma_fence_get(fence);
+	syncobj_uring_advance_fence(&fence, wait->point);
+	if (fence) {
+		list_del_init(&wait->node);
+		if (syncobj_uring_wait_add_fence_cb(fence, wait, &ret))
+			syncobj_uring_wait_schedule_complete(wait, ret);
+	}
+}
+
+int
+drm_syncobj_uring_cmd_wait(struct drm_device *dev, struct drm_file *file_private,
+			   struct io_uring_cmd *cmd, unsigned int issue_flags)
+{
+	const struct drm_syncobj_uring_wait *args = cmd->cmd;
+	struct syncobj_uring_wait_pdu *pdu = (void *)cmd->pdu;
+	struct syncobj_uring_wait *wait = NULL;
+	struct drm_syncobj *syncobj = NULL;
+	struct dma_fence *fence = NULL;
+	u32 handle = args->handle;
+	u64 point = args->point;
+	u32 flags = args->flags;
+	int ret = 0;
+
+	if (point && !drm_core_check_feature(dev, DRIVER_SYNCOBJ_TIMELINE))
+		return -EOPNOTSUPP;
+
+	if (flags & ~(DRM_SYNCOBJ_URING_WAIT_FLAGS_WAIT_FOR_SUBMIT |
+		      DRM_SYNCOBJ_URING_WAIT_FLAGS_WAIT_AVAILABLE))
+		return -EINVAL;
+
+	syncobj = drm_syncobj_find(file_private, handle);
+	if (!syncobj)
+		return -ENOENT;
+
+	if (flags & DRM_SYNCOBJ_URING_WAIT_FLAGS_WAIT_FOR_SUBMIT)
+		lockdep_assert_none_held_once();
+
+	fence = drm_syncobj_fence_get(syncobj);
+	syncobj_uring_advance_fence(&fence, point);
+
+	if (fence) {
+		ret = 0;
+		if (flags & DRM_SYNCOBJ_URING_WAIT_FLAGS_WAIT_AVAILABLE)
+			goto out_done;
+		if (dma_fence_is_signaled(fence))
+			goto out_done;
+	} else {
+		if (!(flags & DRM_SYNCOBJ_URING_WAIT_FLAGS_WAIT_FOR_SUBMIT)) {
+			ret = -ENOENT;
+			goto out_done;
+		}
+	}
+
+	wait = kcalloc(1, sizeof(*wait), GFP_KERNEL);
+	if (!wait) {
+		ret = -ENOMEM;
+		goto out_done;
+	}
+	wait->syncobj = syncobj;
+	wait->cmd = cmd;
+	wait->point = point;
+	wait->available = flags & DRM_SYNCOBJ_URING_WAIT_FLAGS_WAIT_AVAILABLE;
+	*pdu = (struct syncobj_uring_wait_pdu) {
+		.ref = REFCOUNT_INIT(1),
+		.wait = wait,
+	};
+
+	if (!fence) {
+		spin_lock(&syncobj->lock);
+		fence = dma_fence_get(rcu_dereference_protected(syncobj->fence, 1));
+		syncobj_uring_advance_fence(&fence, point);
+		if (!fence) {
+			atomic_set(&wait->state, SYNCOBJ_URING_WAIT_STATE_WAIT_FOR_SUBMIT);
+			list_add_tail(&wait->node, &syncobj->uring_cb_list);
+		}
+		spin_unlock(&syncobj->lock);
+	}
+
+	if (fence && syncobj_uring_wait_add_fence_cb(fence, wait, &ret))
+		goto out_done;
+
+	ret = -EIOCBQUEUED;
+	goto out_pending;
+
+out_done:
+	if (wait)
+		kfree(wait);
+	dma_fence_put(fence);
+	drm_syncobj_put(syncobj);
+
+out_pending:
+	return ret;
+}
+
+int
+drm_syncobj_uring_cmd_wait_cancel(struct io_uring_cmd *cmd)
+{
+	struct syncobj_uring_wait_pdu *pdu = (void *)cmd->pdu;
+	struct syncobj_uring_wait *wait = pdu->wait;
+	int state, ret = 0;
+
+	if (!refcount_inc_not_zero(&pdu->ref))
+		return -ENOENT;
+
+	state = atomic_read_acquire(&wait->state);
+
+	if (state == SYNCOBJ_URING_WAIT_STATE_WAIT_FOR_SUBMIT) {
+		spin_lock(&wait->syncobj->lock);
+		state = atomic_read_acquire(&wait->state);
+		if (state == SYNCOBJ_URING_WAIT_STATE_WAIT_FOR_SUBMIT)
+			list_del_init(&wait->node);
+		spin_unlock(&wait->syncobj->lock);
+	}
+	if (state == SYNCOBJ_URING_WAIT_STATE_WAIT_FOR_SIGNAL) {
+		dma_fence_remove_callback(wait->fence, &wait->fence_cb);
+		state = atomic_read(&wait->state);
+	}
+	if (state == SYNCOBJ_URING_WAIT_STATE_COMPLETED) {
+		ret = -ENOENT;
+		goto out;
+	}
+
+	dma_fence_put(wait->fence);
+	drm_syncobj_put(wait->syncobj);
+	syncobj_uring_wait_put(wait); /* the ref owned by the callbacks */
+
+out:
+	syncobj_uring_wait_put(wait);
+	return ret;
+}
+
+#endif /* CONFIG_IO_URING */

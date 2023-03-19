@@ -9,6 +9,7 @@
 #define DRM_ACCEL_H_
 
 #include <drm/drm_file.h>
+#include <drm/drm_uring.h>
 
 #define ACCEL_MAJOR		261
 #define ACCEL_MAX_MINORS	256
@@ -28,8 +29,8 @@
 	.poll		= drm_poll,\
 	.read		= drm_read,\
 	.llseek		= noop_llseek, \
-	.mmap		= drm_gem_mmap
-
+	.mmap		= drm_gem_mmap,\
+	DRM_URING_FOPS
 /**
  * DEFINE_DRM_ACCEL_FOPS() - macro to generate file operations for accelerators drivers
  * @name: name for the generated structure
@@ -46,7 +47,7 @@
 #define DEFINE_DRM_ACCEL_FOPS(name) \
 	static const struct file_operations name = {\
 		.owner		= THIS_MODULE,\
-		DRM_ACCEL_FOPS,\
+		DRM_ACCEL_FOPS\
 	}
 
 #if IS_ENABLED(CONFIG_DRM_ACCEL)

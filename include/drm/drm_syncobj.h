@@ -54,6 +54,11 @@ struct drm_syncobj {
 	 */
 	struct list_head cb_list;
 	/**
+	 * @uring_cb_list: List of uring callbacks to call when the &fence gets
+	 * replaced.
+	 */
+	struct list_head uring_cb_list;
+	/**
 	 * @lock: Protects &cb_list and write-locks &fence.
 	 */
 	spinlock_t lock;

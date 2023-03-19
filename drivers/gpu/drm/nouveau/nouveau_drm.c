@@ -36,6 +36,7 @@
 #include <drm/drm_gem_ttm_helper.h>
 #include <drm/drm_ioctl.h>
 #include <drm/drm_vblank.h>
+#include <drm/drm_uring.h>
 
 #include <core/gpuobj.h>
 #include <core/option.h>
@@ -1215,6 +1216,7 @@ nouveau_driver_fops = {
 	.compat_ioctl = nouveau_compat_ioctl,
 #endif
 	.llseek = noop_llseek,
+	DRM_URING_FOPS
 };
 
 static struct drm_driver
